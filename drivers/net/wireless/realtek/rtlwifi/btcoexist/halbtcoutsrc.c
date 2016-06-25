@@ -658,6 +658,22 @@ bool exhalbtc_initlize_variables(struct rtl_priv *adapter)
 	return true;
 }
 
+bool exhalbtc_deinitlize_variables(struct rtl_priv *adapter)
+{
+   struct btc_coexist *btcoexist = &gl_bt_coexist;
+
+   if (btcoexist->adapter != adapter) {
+          printk(KERN_WARNING "exhalbtc: try deinitializing a different adapter. Skip.\n");
+          return false;
+   }
+
+   btcoexist->statistics.cnt_bind--;
+   btcoexist->binded = false;
+   btcoexist->adapter = NULL;
+   printk(KERN_INFO "exhalbtc: adapter unbound successfully.\n");
+   return true;
+}
+
 void exhalbtc_init_hw_config(struct btc_coexist *btcoexist)
 {
 	struct rtl_priv *rtlpriv = btcoexist->adapter;

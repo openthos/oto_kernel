@@ -1909,6 +1909,7 @@ static void rtl_pci_stop(struct ieee80211_hw *hw)
 	spin_unlock_irqrestore(&rtlpriv->locks.rf_ps_lock, flags);
 
 	rtl_pci_enable_aspm(hw);
+	rtlpriv->btcoexist.btc_ops->btc_init_variables(rtlpriv);
 }
 
 static bool _rtl_pci_find_adapter(struct pci_dev *pdev,

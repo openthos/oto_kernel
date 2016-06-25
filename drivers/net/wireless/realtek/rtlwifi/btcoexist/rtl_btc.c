@@ -31,6 +31,7 @@
 
 static struct rtl_btc_ops rtl_btc_operation = {
 	.btc_init_variables = rtl_btc_init_variables,
+	.btc_deinit_variables = rtl_btc_deinit_variables,
 	.btc_init_hal_vars = rtl_btc_init_hal_vars,
 	.btc_init_hw_config = rtl_btc_init_hw_config,
 	.btc_ips_notify = rtl_btc_ips_notify,
@@ -50,6 +51,12 @@ static struct rtl_btc_ops rtl_btc_operation = {
 void rtl_btc_init_variables(struct rtl_priv *rtlpriv)
 {
 	exhalbtc_initlize_variables(rtlpriv);
+}
+
+void rtl_btc_deinit_variables(struct rtl_priv *rtlpriv)
+{
+
+    exhalbtc_deinitlize_variables(rtlpriv);
 }
 
 void rtl_btc_init_hal_vars(struct rtl_priv *rtlpriv)

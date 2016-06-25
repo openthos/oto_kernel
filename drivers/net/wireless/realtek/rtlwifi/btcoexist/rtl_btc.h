@@ -28,6 +28,7 @@
 #include "halbt_precomp.h"
 
 void rtl_btc_init_variables(struct rtl_priv *rtlpriv);
+void rtl_btc_deinit_variables(struct rtl_priv *rtlpriv);
 void rtl_btc_init_hal_vars(struct rtl_priv *rtlpriv);
 void rtl_btc_init_hw_config(struct rtl_priv *rtlpriv);
 void rtl_btc_ips_notify(struct rtl_priv *rtlpriv, u8 type);
