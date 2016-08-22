@@ -2700,12 +2700,12 @@ int drm_mode_setcrtc(struct drm_device *dev, void *data,
 				goto out;
 			}
 		}
-#if 0
+
 		ret = drm_crtc_check_viewport(crtc, crtc_req->x, crtc_req->y,
 					      mode, fb);
 		if (ret)
 			goto out;
-#endif
+
 	}
 
 	if (crtc_req->count_connectors == 0 && mode) {
