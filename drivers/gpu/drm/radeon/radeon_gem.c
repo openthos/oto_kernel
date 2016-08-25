@@ -800,8 +800,31 @@ static int radeon_debugfs_gem_info(struct seq_file *m, void *data)
 	return 0;
 }
 
+static int radeon_debugfs_display_info(struct seq_file *m, void *data)
+{
+	struct drm_info_node *node = (struct drm_info_node *)m->private;
+	struct drm_device *dev = node->minor->dev;
+	struct drm_connector *connector;
+	drm_modeset_lock_all(dev);
+	list_for_each_entry(connector, &dev->mode_config.connector_list, head) {
+		seq_printf(m, "--------------\n");
+		seq_printf(m, "connector %d: type %s, status: %s\n",
+					   connector->base.id, connector->name,
+		drm_get_connector_status_name(connector->status));
+		if (connector->status == connector_status_connected) {
+			seq_printf(m, "\tname: %s\n", connector->display_info.name);
+			seq_printf(m, "\tphysical dimensions: %dx%dmm\n",
+					   connector->display_info.width_mm, connector->display_info.height_mm);
+		}
+	}
+	drm_modeset_unlock_all(dev);
+	return 0;
+}
 static struct drm_info_list radeon_debugfs_gem_list[] = {
 	{"radeon_gem_info", &radeon_debugfs_gem_info, 0, NULL},
+};
+static struct drm_info_list radeon_debugfs_display_list[] = {
+	{"radeon_display_info", &radeon_debugfs_display_info, 0, NULL},
 };
 #endif
 
@@ -809,6 +832,13 @@ int radeon_gem_debugfs_init(struct radeon_device *rdev)
 {
 #if defined(CONFIG_DEBUG_FS)
 	return radeon_debugfs_add_files(rdev, radeon_debugfs_gem_list, 1);
+#endif
+	return 0;
+}
+int radeon_display_debugfs_init(struct radeon_device *rdev)
+{
+#if defined(CONFIG_DEBUG_FS)
+	return radeon_debugfs_add_files(rdev, radeon_debugfs_display_list, 1);
 #endif
 	return 0;
 }

@@ -512,6 +512,7 @@ struct radeon_bo {
 #define gem_to_radeon_bo(gobj) container_of((gobj), struct radeon_bo, gem_base)
 
 int radeon_gem_debugfs_init(struct radeon_device *rdev);
+int radeon_display_debugfs_init(struct radeon_device *rdev);
 
 /* sub-allocation manager, it has to be protected by another lock.
  * By conception this is an helper for other part of the driver

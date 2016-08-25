@@ -1502,6 +1502,9 @@ int radeon_device_init(struct radeon_device *rdev,
 		else
 			DRM_INFO("radeon: acceleration disabled, skipping benchmarks\n");
 	}
+	if(radeon_display_debugfs_init(rdev)){
+		DRM_ERROR("radeon:DISPLAY DEBUGFS INIT FAILED\n");
+	}
 	return 0;
 
 failed:
