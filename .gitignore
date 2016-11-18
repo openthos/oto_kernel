@@ -24,7 +24,7 @@
 *.elf
 *.bin
 *.tar
-*.gz
+#*.gz disable .gz by openthos
 *.bz2
 *.lzma
 *.xz
