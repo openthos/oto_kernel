@@ -51,6 +51,7 @@
 #include <linux/kref.h>
 #include <linux/pm_qos.h>
 #include "intel_guc.h"
+#include "hdmi_audio_if.h"
 
 /* General customization:
  */
@@ -1170,6 +1171,18 @@ struct intel_gen6_power_mgmt {
 	struct mutex hw_lock;
 };
 
+/* Runtime power management related */
+struct intel_gen7_rpm {
+	/* To track (num of get calls - num of put calls)
+	 * made by procfs
+	 */
+	atomic_t procfs_count;
+	/* To make sure ring get/put are in pair */
+	bool ring_active;
+	struct proc_dir_entry *i915_proc_dir;
+	struct proc_dir_entry *i915_proc_file;
+};
+
 /* defined intel_pm.c */
 extern spinlock_t mchdev_lock;
 
@@ -1956,6 +1969,19 @@ struct drm_i915_private {
 	/* perform PHY state sanity checks? */
 	bool chv_phy_assert[2];
 
+	/* Added for HDMI Audio */
+	had_event_call_back had_event_callbacks;
+	struct snd_intel_had_interface *had_interface;
+	void *had_pvt_data;
+	int tmds_clock_speed;
+	int hdmi_audio_interrupt_mask;
+	struct work_struct hdmi_audio_wq;
+
+	u32 hotplug_status;
+
+	/* Runtime power management related */
+	struct intel_gen7_rpm rpm;
+
 	/*
 	 * NOTE: This is the dri1/ums dungeon, don't add stuff here. Your patch
 	 * will be rejected. Instead look for a better place.
@@ -2150,21 +2176,19 @@ struct drm_i915_gem_object {
 	/** Record of address bit 17 of each page at last unbind. */
 	unsigned long *bit_17;
 
-	union {
-		/** for phy allocated objects */
-		struct drm_dma_handle *phys_handle;
-
-		struct i915_gem_userptr {
-			uintptr_t ptr;
-			unsigned read_only :1;
-			unsigned workers :4;
+	struct i915_gem_userptr {
+		uintptr_t ptr;
+		unsigned read_only :1;
+		unsigned workers :4;
 #define I915_GEM_USERPTR_MAX_WORKERS 15
 
-			struct i915_mm_struct *mm;
-			struct i915_mmu_object *mmu_object;
-			struct work_struct *work;
-		} userptr;
-	};
+		struct i915_mm_struct *mm;
+		struct i915_mmu_object *mmu_object;
+		struct work_struct *work;
+	} userptr;
+
+	/** for phys allocated objects */
+	struct drm_dma_handle *phys_handle;
 };
 #define to_intel_bo(x) container_of(x, struct drm_i915_gem_object, base)
 
@@ -3313,6 +3337,9 @@ static inline bool intel_gmbus_is_forced_bit(struct i2c_adapter *adapter)
 }
 extern void intel_i2c_reset(struct drm_device *dev);
 
+/* intel_bios.c */
+bool intel_bios_is_port_present(struct drm_i915_private *dev_priv, enum port port);
+
 /* intel_opregion.c */
 #ifdef CONFIG_ACPI
 extern int intel_opregion_setup(struct drm_device *dev);
@@ -3444,6 +3471,11 @@ int intel_freq_opcode(struct drm_i915_private *dev_priv, int val);
 		upper = I915_READ(upper_reg);				\
 	} while (upper != old_upper && loop++ < 2);			\
 	(u64)upper << 32 | lower; })
+
+int i915_rpm_get_disp(struct drm_device *dev);
+int i915_rpm_put_disp(struct drm_device *dev);
+
+bool i915_is_device_active(struct drm_device *dev);
 
 #define POSTING_READ(reg)	(void)I915_READ_NOTRACE(reg)
 #define POSTING_READ16(reg)	(void)I915_READ16_NOTRACE(reg)

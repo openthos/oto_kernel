@@ -676,6 +676,14 @@ struct cxsr_latency {
 #define to_intel_plane_state(x) container_of(x, struct intel_plane_state, base)
 #define intel_fb_obj(x) (x ? to_intel_framebuffer(x)->obj : NULL)
 
+/* HDMI bits are shared with the DP bits */
+#define   HDMIB_HOTPLUG_LIVE_STATUS             (1 << 29)
+#define   HDMIC_HOTPLUG_LIVE_STATUS             (1 << 28)
+#define   HDMID_HOTPLUG_LIVE_STATUS             (1 << 27)
+#define   HDMI_LIVE_STATUS_BASE			30
+#define   HDMI_LIVE_STATUS_DELAY_STEP		10
+#define   HDMI_EDID_RETRY_COUNT			3
+
 struct intel_hdmi {
 	u32 hdmi_reg;
 	int ddc_bus;
@@ -687,6 +695,9 @@ struct intel_hdmi {
 	bool rgb_quant_range_selectable;
 	enum hdmi_picture_aspect aspect_ratio;
 	struct intel_connector *attached_connector;
+	struct edid *edid;
+	uint32_t edid_mode_count;
+
 	void (*write_infoframe)(struct drm_encoder *encoder,
 				enum hdmi_infoframe_type type,
 				const void *frame, ssize_t len);
@@ -783,7 +794,6 @@ struct intel_dp {
 				     bool has_aux_irq,
 				     int send_bytes,
 				     uint32_t aux_clock_divider);
-	bool train_set_valid;
 
 	/* Displayport compliance testing */
 	unsigned long compliance_test_type;
@@ -1106,6 +1116,8 @@ intel_rotation_90_or_270(unsigned int rotation)
 
 void intel_create_rotation_property(struct drm_device *dev,
 					struct intel_plane *plane);
+void chv_set_lpe_audio_reg_pipe(struct drm_device *dev,
+				int encoder_type, enum port port);
 
 /* shared dpll functions */
 struct intel_shared_dpll *intel_crtc_to_shared_dpll(struct intel_crtc *crtc);
@@ -1178,9 +1190,9 @@ void intel_modeset_preclose(struct drm_device *dev, struct drm_file *file);
 int skl_update_scaler_crtc(struct intel_crtc_state *crtc_state);
 int skl_max_scale(struct intel_crtc *crtc, struct intel_crtc_state *crtc_state);
 
-unsigned long intel_plane_obj_offset(struct intel_plane *intel_plane,
-				     struct drm_i915_gem_object *obj,
-				     unsigned int plane);
+u32 intel_plane_obj_offset(struct intel_plane *intel_plane,
+			   struct drm_i915_gem_object *obj,
+			   unsigned int plane);
 
 u32 skl_plane_ctl_format(uint32_t pixel_format);
 u32 skl_plane_ctl_tiling(uint64_t fb_modifier);
@@ -1196,7 +1208,7 @@ void intel_csr_ucode_fini(struct drm_device *dev);
 void assert_csr_loaded(struct drm_i915_private *dev_priv);
 
 /* intel_dp.c */
-void intel_dp_init(struct drm_device *dev, int output_reg, enum port port);
+bool intel_dp_init(struct drm_device *dev, int output_reg, enum port port);
 bool intel_dp_init_connector(struct intel_digital_port *intel_dig_port,
 			     struct intel_connector *intel_connector);
 void intel_dp_set_link_params(struct intel_dp *intel_dp,
@@ -1232,8 +1244,6 @@ void intel_edp_drrs_disable(struct intel_dp *intel_dp);
 void intel_edp_drrs_invalidate(struct drm_device *dev,
 		unsigned frontbuffer_bits);
 void intel_edp_drrs_flush(struct drm_device *dev, unsigned frontbuffer_bits);
-bool intel_digital_port_connected(struct drm_i915_private *dev_priv,
-					 struct intel_digital_port *port);
 void hsw_dp_set_ddi_pll_sel(struct intel_crtc_state *pipe_config);
 
 /* intel_dp_mst.c */

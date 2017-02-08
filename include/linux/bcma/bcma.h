@@ -151,11 +151,14 @@ struct bcma_host_ops {
 #define BCMA_CORE_PCIE2			0x83C	/* PCI Express Gen2 */
 #define BCMA_CORE_USB30_DEV		0x83D
 #define BCMA_CORE_ARM_CR4		0x83E
+#define BCMA_CORE_GCI			0x840
+#define BCMA_CORE_CMEM			0x846	/* CNDS DDR2/3 memory controller */
 #define BCMA_CORE_ARM_CA7		0x847
 #define BCMA_CORE_SYS_MEM		0x849
 #define BCMA_CORE_DEFAULT		0xFFF
 
 #define BCMA_MAX_NR_CORES		16
+#define BCMA_CORE_SIZE			0x1000
 
 /* Chip IDs of PCIe devices */
 #define BCMA_CHIP_ID_BCM4313	0x4313

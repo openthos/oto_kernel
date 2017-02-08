@@ -2153,9 +2153,11 @@ static long shmem_fallocate(struct file *file, int mode, loff_t offset,
 									NULL);
 		if (error) {
 			/* Remove the !PageUptodate pages we added */
-			shmem_undo_range(inode,
-				(loff_t)start << PAGE_CACHE_SHIFT,
-				(loff_t)index << PAGE_CACHE_SHIFT, true);
+			if (index > start) {
+				shmem_undo_range(inode,
+				 (loff_t)start << PAGE_CACHE_SHIFT,
+				 ((loff_t)index << PAGE_CACHE_SHIFT) - 1, true);
+			}
 			goto undone;
 		}
 
@@ -2565,7 +2567,8 @@ static int shmem_xattr_validate(const char *name)
 {
 	struct { const char *prefix; size_t len; } arr[] = {
 		{ XATTR_SECURITY_PREFIX, XATTR_SECURITY_PREFIX_LEN },
-		{ XATTR_TRUSTED_PREFIX, XATTR_TRUSTED_PREFIX_LEN }
+		{ XATTR_TRUSTED_PREFIX, XATTR_TRUSTED_PREFIX_LEN },
+		{ XATTR_USER_PREFIX, XATTR_USER_PREFIX_LEN }
 	};
 	int i;
 

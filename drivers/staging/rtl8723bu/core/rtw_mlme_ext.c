@@ -11069,7 +11069,7 @@ void _linked_info_dump(_adapter *padapter)
 {
 	int i;
 	struct mlme_ext_priv    *pmlmeext = &padapter->mlmeextpriv;
-     	struct mlme_ext_info    *pmlmeinfo = &(pmlmeext->mlmext_info);
+	struct mlme_ext_info    *pmlmeinfo = &(pmlmeext->mlmext_info);
 	u8 mac_id;
 	int UndecoratedSmoothedPWDB;
 	struct dvobj_priv *pdvobj = adapter_to_dvobj(padapter);

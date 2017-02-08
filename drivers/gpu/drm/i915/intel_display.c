@@ -2950,13 +2950,13 @@ u32 intel_fb_stride_alignment(struct drm_device *dev, uint64_t fb_modifier,
 	}
 }
 
-unsigned long intel_plane_obj_offset(struct intel_plane *intel_plane,
-				     struct drm_i915_gem_object *obj,
-				     unsigned int plane)
+u32 intel_plane_obj_offset(struct intel_plane *intel_plane,
+			   struct drm_i915_gem_object *obj,
+			   unsigned int plane)
 {
 	const struct i915_ggtt_view *view = &i915_ggtt_view_normal;
 	struct i915_vma *vma;
-	unsigned char *offset;
+	u64 offset;
 
 	if (intel_rotation_90_or_270(intel_plane->base.state->rotation))
 		view = &i915_ggtt_view_rotated;
@@ -2966,14 +2966,16 @@ unsigned long intel_plane_obj_offset(struct intel_plane *intel_plane,
 		view->type))
 		return -1;
 
-	offset = (unsigned char *)vma->node.start;
+	offset = vma->node.start;
 
 	if (plane == 1) {
 		offset += vma->ggtt_view.rotation_info.uv_start_page *
 			  PAGE_SIZE;
 	}
 
-	return (unsigned long)offset;
+	WARN_ON(upper_32_bits(offset));
+
+	return lower_32_bits(offset);
 }
 
 static void skl_detach_scaler(struct intel_crtc *intel_crtc, int id)
@@ -3099,7 +3101,7 @@ static void skylake_update_primary_plane(struct drm_crtc *crtc,
 	u32 tile_height, plane_offset, plane_size;
 	unsigned int rotation;
 	int x_offset, y_offset;
-	unsigned long surf_addr;
+	u32 surf_addr;
 	struct intel_crtc_state *crtc_state = intel_crtc->config;
 	struct intel_plane_state *plane_state;
 	int src_x = 0, src_y = 0, src_w = 0, src_h = 0;
@@ -7967,6 +7969,16 @@ static int i9xx_crtc_compute_clock(struct intel_crtc *crtc,
 				  num_connectors);
 	}
 
+	/* Added for HDMI Audio */
+	if ((IS_CHERRYVIEW(dev)) || (IS_VALLEYVIEW(dev))) {
+		if (intel_pipe_will_have_type(crtc_state, INTEL_OUTPUT_HDMI)) {
+			dev_priv->tmds_clock_speed = crtc_state->port_clock;
+
+			mid_hdmi_audio_signal_event(dev_priv->dev,
+				HAD_EVENT_MODE_CHANGING);
+		}
+	}
+
 	return 0;
 }
 
@@ -8228,12 +8240,14 @@ static void ironlake_init_pch_refclk(struct drm_device *dev)
 {
 	struct drm_i915_private *dev_priv = dev->dev_private;
 	struct intel_encoder *encoder;
+	int i;
 	u32 val, final;
 	bool has_lvds = false;
 	bool has_cpu_edp = false;
 	bool has_panel = false;
 	bool has_ck505 = false;
 	bool can_ssc = false;
+	bool using_ssc_source = false;
 
 	/* We need to take the global config into account */
 	for_each_intel_encoder(dev, encoder) {
@@ -8260,8 +8274,22 @@ static void ironlake_init_pch_refclk(struct drm_device *dev)
 		can_ssc = true;
 	}
 
-	DRM_DEBUG_KMS("has_panel %d has_lvds %d has_ck505 %d\n",
-		      has_panel, has_lvds, has_ck505);
+	/* Check if any DPLLs are using the SSC source */
+	for (i = 0; i < dev_priv->num_shared_dpll; i++) {
+		u32 temp = I915_READ(PCH_DPLL(i));
+
+		if (!(temp & DPLL_VCO_ENABLE))
+			continue;
+
+		if ((temp & PLL_REF_INPUT_MASK) ==
+		    PLLB_REF_INPUT_SPREADSPECTRUMIN) {
+			using_ssc_source = true;
+			break;
+		}
+	}
+
+	DRM_DEBUG_KMS("has_panel %d has_lvds %d has_ck505 %d using_ssc_source %d\n",
+		      has_panel, has_lvds, has_ck505, using_ssc_source);
 
 	/* Ironlake: try to setup display ref clock before DPLL
 	 * enabling. This is only under driver's control after
@@ -8298,9 +8326,9 @@ static void ironlake_init_pch_refclk(struct drm_device *dev)
 				final |= DREF_CPU_SOURCE_OUTPUT_NONSPREAD;
 		} else
 			final |= DREF_CPU_SOURCE_OUTPUT_DISABLE;
-	} else {
-		final |= DREF_SSC_SOURCE_DISABLE;
-		final |= DREF_CPU_SOURCE_OUTPUT_DISABLE;
+	} else if (using_ssc_source) {
+		final |= DREF_SSC_SOURCE_ENABLE;
+		final |= DREF_SSC1_ENABLE;
 	}
 
 	if (final == val)
@@ -8346,7 +8374,7 @@ static void ironlake_init_pch_refclk(struct drm_device *dev)
 		POSTING_READ(PCH_DREF_CONTROL);
 		udelay(200);
 	} else {
-		DRM_DEBUG_KMS("Disabling SSC entirely\n");
+		DRM_DEBUG_KMS("Disabling CPU source output\n");
 
 		val &= ~DREF_CPU_SOURCE_OUTPUT_MASK;
 
@@ -8357,16 +8385,20 @@ static void ironlake_init_pch_refclk(struct drm_device *dev)
 		POSTING_READ(PCH_DREF_CONTROL);
 		udelay(200);
 
-		/* Turn off the SSC source */
-		val &= ~DREF_SSC_SOURCE_MASK;
-		val |= DREF_SSC_SOURCE_DISABLE;
+		if (!using_ssc_source) {
+			DRM_DEBUG_KMS("Disabling SSC source\n");
 
-		/* Turn off SSC1 */
-		val &= ~DREF_SSC1_ENABLE;
+			/* Turn off the SSC source */
+			val &= ~DREF_SSC_SOURCE_MASK;
+			val |= DREF_SSC_SOURCE_DISABLE;
 
-		I915_WRITE(PCH_DREF_CONTROL, val);
-		POSTING_READ(PCH_DREF_CONTROL);
-		udelay(200);
+			/* Turn off SSC1 */
+			val &= ~DREF_SSC1_ENABLE;
+
+			I915_WRITE(PCH_DREF_CONTROL, val);
+			POSTING_READ(PCH_DREF_CONTROL);
+			udelay(200);
+		}
 	}
 
 	BUG_ON(val != final);
@@ -9668,6 +9700,8 @@ static void broadwell_set_cdclk(struct drm_device *dev, int cdclk)
 	mutex_lock(&dev_priv->rps.hw_lock);
 	sandybridge_pcode_write(dev_priv, HSW_PCODE_DE_WRITE_FREQ_REQ, data);
 	mutex_unlock(&dev_priv->rps.hw_lock);
+
+	I915_WRITE(CDCLK_FREQ, DIV_ROUND_CLOSEST(cdclk, 1000) - 1);
 
 	intel_update_cdclk(dev);
 
@@ -11930,21 +11964,11 @@ connected_sink_compute_bpp(struct intel_connector *connector,
 		pipe_config->pipe_bpp = connector->base.display_info.bpc*3;
 	}
 
-	/* Clamp bpp to default limit on screens without EDID 1.4 */
-	if (connector->base.display_info.bpc == 0) {
-		int type = connector->base.connector_type;
-		int clamp_bpp = 24;
-
-		/* Fall back to 18 bpp when DP sink capability is unknown. */
-		if (type == DRM_MODE_CONNECTOR_DisplayPort ||
-		    type == DRM_MODE_CONNECTOR_eDP)
-			clamp_bpp = 18;
-
-		if (bpp > clamp_bpp) {
-			DRM_DEBUG_KMS("clamping display bpp (was %d) to default limit of %d\n",
-				      bpp, clamp_bpp);
-			pipe_config->pipe_bpp = clamp_bpp;
-		}
+	/* Clamp bpp to 8 on screens without EDID 1.4 */
+	if (connector->base.display_info.bpc == 0 && bpp > 24) {
+		DRM_DEBUG_KMS("clamping display bpp (was %d) to default limit of 24\n",
+			      bpp);
+		pipe_config->pipe_bpp = 24;
 	}
 }
 
@@ -14148,6 +14172,8 @@ static void intel_setup_outputs(struct drm_device *dev)
 		if (I915_READ(PCH_DP_D) & DP_DETECTED)
 			intel_dp_init(dev, PCH_DP_D, PORT_D);
 	} else if (IS_VALLEYVIEW(dev)) {
+		bool has_edp, has_port;
+
 		/*
 		 * The DP_DETECTED bit is the latched state of the DDC
 		 * SDA pin at boot. However since eDP doesn't require DDC
@@ -14156,27 +14182,37 @@ static void intel_setup_outputs(struct drm_device *dev)
 		 * Thus we can't rely on the DP_DETECTED bit alone to detect
 		 * eDP ports. Consult the VBT as well as DP_DETECTED to
 		 * detect eDP ports.
+		 *
+		 * Sadly the straps seem to be missing sometimes even for HDMI
+		 * ports (eg. on Voyo V3 - CHT x7-Z8700), so check both strap
+		 * and VBT for the presence of the port. Additionally we can't
+		 * trust the port type the VBT declares as we've seen at least
+		 * HDMI ports that the VBT claim are DP or eDP.
 		 */
-		if (I915_READ(VLV_HDMIB) & SDVO_DETECTED &&
-		    !intel_dp_is_edp(dev, PORT_B))
+		has_edp = intel_dp_is_edp(dev, PORT_B);
+		has_port = intel_bios_is_port_present(dev_priv, PORT_B);
+		if (I915_READ(VLV_DP_B) & DP_DETECTED || has_port)
+			has_edp &= intel_dp_init(dev, VLV_DP_B, PORT_B);
+		if ((I915_READ(VLV_HDMIB) & SDVO_DETECTED || has_port) && !has_edp)
 			intel_hdmi_init(dev, VLV_HDMIB, PORT_B);
-		if (I915_READ(VLV_DP_B) & DP_DETECTED ||
-		    intel_dp_is_edp(dev, PORT_B))
-			intel_dp_init(dev, VLV_DP_B, PORT_B);
 
-		if (I915_READ(VLV_HDMIC) & SDVO_DETECTED &&
-		    !intel_dp_is_edp(dev, PORT_C))
+		has_edp = intel_dp_is_edp(dev, PORT_C);
+		has_port = intel_bios_is_port_present(dev_priv, PORT_C);
+		if (I915_READ(VLV_DP_C) & DP_DETECTED || has_port)
+			has_edp &= intel_dp_init(dev, VLV_DP_C, PORT_C);
+		if ((I915_READ(VLV_HDMIC) & SDVO_DETECTED || has_port) && !has_edp)
 			intel_hdmi_init(dev, VLV_HDMIC, PORT_C);
-		if (I915_READ(VLV_DP_C) & DP_DETECTED ||
-		    intel_dp_is_edp(dev, PORT_C))
-			intel_dp_init(dev, VLV_DP_C, PORT_C);
 
 		if (IS_CHERRYVIEW(dev)) {
-			/* eDP not supported on port D, so don't check VBT */
-			if (I915_READ(CHV_HDMID) & SDVO_DETECTED)
-				intel_hdmi_init(dev, CHV_HDMID, PORT_D);
-			if (I915_READ(CHV_DP_D) & DP_DETECTED)
+			/*
+			 * eDP not supported on port D,
+			 * so no need to worry about it
+			 */
+			has_port = intel_bios_is_port_present(dev_priv, PORT_D);
+			if (I915_READ(CHV_DP_D) & DP_DETECTED || has_port)
 				intel_dp_init(dev, CHV_DP_D, PORT_D);
+			if (I915_READ(CHV_HDMID) & SDVO_DETECTED || has_port)
+				intel_hdmi_init(dev, CHV_HDMID, PORT_D);
 		}
 
 		intel_dsi_init(dev);
@@ -14232,6 +14268,82 @@ static void intel_setup_outputs(struct drm_device *dev)
 	intel_init_pch_refclk(dev);
 
 	drm_helper_move_panel_connectors_to_head(dev);
+}
+
+void chv_set_lpe_audio_reg_pipe(struct drm_device *dev,
+				int encoder_type, enum port port)
+{
+	struct drm_i915_private *dev_priv = dev->dev_private;
+	struct intel_encoder *intel_encoder;
+	struct hdmi_audio_priv *hdmi_priv = get_hdmi_priv();
+
+	if(!hdmi_priv) {
+		DRM_DEBUG_KMS("hdmi_priv was never allocated\n");
+		return;
+	}
+
+	/*
+	 * Due to hardware limitaion, Port D will always
+	 * be driven by Pipe C. So Port B and Port C will
+	 * be driven by either Pipe A or PipeB, depending
+	 * on whether the LFP is MIPI or EDP.
+	 */
+
+	if (port == PORT_D) {
+		hdmi_priv->hdmi_lpe_audio_reg =
+			I915_HDMI_AUDIO_LPE_C_CONFIG;
+		hdmi_priv->pipe = PIPE_C;
+		if (encoder_type == INTEL_OUTPUT_HDMI)
+			hdmi_priv->hdmi_reg = HDMID;
+		//else
+		//	hdmi_priv->hdmi_reg = CHV_DP_D;
+	} else {
+		list_for_each_entry(intel_encoder, &dev->
+			mode_config.encoder_list, base.head) {
+
+			/*
+			 * MIPI always comes on Pipe A or Pipe B
+			 * depending on Port A or Port C and EDP
+			 * comes on Pipe B. So the other pipe
+			 * will only be able to drive the DP.
+			 * MIPI on Port A is driven by Pipe A
+			 * and MIPI on Port C is driven by
+			 * Pipe B. So the other pipe will
+			 * drive DP.
+			 */
+
+			if (intel_encoder->type == INTEL_OUTPUT_EDP) {
+				hdmi_priv->hdmi_lpe_audio_reg =
+					I915_HDMI_AUDIO_LPE_A_CONFIG;
+				hdmi_priv->pipe = PIPE_A;
+				break;
+			} else if (intel_encoder->type == INTEL_OUTPUT_DSI &&
+				dev_priv->vbt.dsi.port == DVO_PORT_MIPIA) {
+				hdmi_priv->hdmi_lpe_audio_reg =
+					I915_HDMI_AUDIO_LPE_B_CONFIG;
+				hdmi_priv->pipe = PIPE_B;
+				break;
+			} else if (intel_encoder->type == INTEL_OUTPUT_DSI &&
+				dev_priv->vbt.dsi.port == DVO_PORT_MIPIC) {
+				hdmi_priv->hdmi_lpe_audio_reg =
+					I915_HDMI_AUDIO_LPE_A_CONFIG;
+				hdmi_priv->pipe = PIPE_A;
+				break;
+			}
+		}
+
+		if (port == PORT_B) {
+			if (encoder_type == INTEL_OUTPUT_HDMI)
+				hdmi_priv->hdmi_reg = HDMIB;
+			//else
+			//	hdmi_priv->hdmi_reg = VLV_DP_B;
+		} else {
+			if (encoder_type == INTEL_OUTPUT_HDMI)
+				hdmi_priv->hdmi_reg = HDMIC;
+			//else
+			//	hdmi_priv->hdmi_reg = VLV_DP_C;
+		}
+	}
 }
 
 static void intel_user_framebuffer_destroy(struct drm_framebuffer *fb)

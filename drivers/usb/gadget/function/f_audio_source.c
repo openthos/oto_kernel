@@ -310,6 +310,7 @@ static struct device_attribute *audio_source_function_attributes[] = {
 static struct usb_request *audio_request_new(struct usb_ep *ep, int buffer_size)
 {
 	struct usb_request *req = usb_ep_alloc_request(ep, GFP_KERNEL);
+
 	if (!req)
 		return NULL;
 
@@ -377,10 +378,9 @@ static void audio_send(struct audio_dev *audio)
 
 	/* compute number of frames to send */
 	now = ktime_get();
-	msecs = ktime_to_ns(now) - ktime_to_ns(audio->start_time);
-	do_div(msecs, 1000000);
-	frames = msecs * SAMPLE_RATE;
-	do_div(frames, 1000);
+	msecs = div_s64((ktime_to_ns(now) - ktime_to_ns(audio->start_time)),
+			1000000);
+	frames = div_s64((msecs * SAMPLE_RATE), 1000);
 
 	/* Readjust our frames_sent if we fall too far behind.
 	 * If we get too far behind it is better to drop some frames than
@@ -581,6 +581,11 @@ static void audio_disable(struct usb_function *f)
 
 	pr_debug("audio_disable\n");
 	usb_ep_disable(audio->in_ep);
+}
+
+static void audio_free_func(struct usb_function *f)
+{
+	/* no-op */
 }
 
 /*-------------------------------------------------------------------------*/
@@ -827,6 +832,7 @@ static struct audio_dev _audio_dev = {
 		.set_alt = audio_set_alt,
 		.setup = audio_setup,
 		.disable = audio_disable,
+		.free_func = audio_free_func,
 	},
 	.lock = __SPIN_LOCK_UNLOCKED(_audio_dev.lock),
 	.idle_reqs = LIST_HEAD_INIT(_audio_dev.idle_reqs),

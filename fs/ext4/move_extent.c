@@ -390,6 +390,7 @@ data_copy:
 		*err = ext4_get_block(orig_inode, orig_blk_offset + i, bh, 0);
 		if (*err < 0)
 			break;
+		bh = bh->b_this_page;
 	}
 	if (!*err)
 		*err = block_commit_write(pagep[0], from, from + replaced_size);
@@ -594,6 +595,13 @@ ext4_move_extents(struct file *o_filp, struct file *d_filp, __u64 orig_blk,
 	    ext4_should_journal_data(donor_inode)) {
 		ext4_msg(orig_inode->i_sb, KERN_ERR,
 			 "Online defrag not supported with data journaling");
+		return -EOPNOTSUPP;
+	}
+
+	if (ext4_encrypted_inode(orig_inode) ||
+	    ext4_encrypted_inode(donor_inode)) {
+		ext4_msg(orig_inode->i_sb, KERN_ERR,
+			 "Online defrag not supported for encrypted files");
 		return -EOPNOTSUPP;
 	}
 

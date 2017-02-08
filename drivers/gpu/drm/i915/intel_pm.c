@@ -31,6 +31,17 @@
 #include "../../../platform/x86/intel_ips.h"
 #include <linux/module.h>
 
+typedef enum _UHBUsage {
+	OSPM_UHB_ONLY_IF_ON = 0,
+	OSPM_UHB_FORCE_POWER_ON,
+} UHBUsage;
+
+static struct drm_device *gdev;
+
+#ifdef CONFIG_HAS_EARLYSUSPEND
+	#include <linux/earlysuspend.h>
+#endif
+
 /**
  * RC6 is a special power stage which allows the GPU to enter an very
  * low-voltage mode when idle, using down to 0V while at this stage.  This
@@ -1789,16 +1800,20 @@ static uint32_t ilk_compute_cur_wm(const struct intel_crtc_state *cstate,
 				   const struct intel_plane_state *pstate,
 				   uint32_t mem_value)
 {
-	int bpp = pstate->base.fb ? pstate->base.fb->bits_per_pixel / 8 : 0;
+	/*
+	 * We treat the cursor plane as always-on for the purposes of watermark
+	 * calculation.  Until we have two-stage watermark programming merged,
+	 * this is necessary to avoid flickering.
+	 */
+	int cpp = 4;
+	int width = pstate->visible ? pstate->base.crtc_w : 64;
 
-	if (!cstate->base.active || !pstate->visible)
+	if (!cstate->base.active)
 		return 0;
 
 	return ilk_wm_method2(ilk_pipe_pixel_rate(cstate),
 			      cstate->base.adjusted_mode.crtc_htotal,
-			      drm_rect_width(&pstate->dst),
-			      bpp,
-			      mem_value);
+			      width, cpp, mem_value);
 }
 
 /* Only for WM_LP. */
@@ -2093,32 +2108,34 @@ static void intel_read_wm_latency(struct drm_device *dev, uint16_t wm[8])
 				GEN9_MEM_LATENCY_LEVEL_MASK;
 
 		/*
+		 * If a level n (n > 1) has a 0us latency, all levels m (m >= n)
+		 * need to be disabled. We make sure to sanitize the values out
+		 * of the punit to satisfy this requirement.
+		 */
+		for (level = 1; level <= max_level; level++) {
+			if (wm[level] == 0) {
+				for (i = level + 1; i <= max_level; i++)
+					wm[i] = 0;
+				break;
+			}
+		}
+
+		/*
 		 * WaWmMemoryReadLatency:skl
 		 *
 		 * punit doesn't take into account the read latency so we need
-		 * to add 2us to the various latency levels we retrieve from
-		 * the punit.
-		 *   - W0 is a bit special in that it's the only level that
-		 *   can't be disabled if we want to have display working, so
-		 *   we always add 2us there.
-		 *   - For levels >=1, punit returns 0us latency when they are
-		 *   disabled, so we respect that and don't add 2us then
-		 *
-		 * Additionally, if a level n (n > 1) has a 0us latency, all
-		 * levels m (m >= n) need to be disabled. We make sure to
-		 * sanitize the values out of the punit to satisfy this
-		 * requirement.
+		 * to add 2us to the various latency levels we retrieve from the
+		 * punit when level 0 response data us 0us.
 		 */
-		wm[0] += 2;
-		for (level = 1; level <= max_level; level++)
-			if (wm[level] != 0)
+		if (wm[0] == 0) {
+			wm[0] += 2;
+			for (level = 1; level <= max_level; level++) {
+				if (wm[level] == 0)
+					break;
 				wm[level] += 2;
-			else {
-				for (i = level + 1; i <= max_level; i++)
-					wm[i] = 0;
-
-				break;
 			}
+		}
+
 	} else if (IS_HASWELL(dev) || IS_BROADWELL(dev)) {
 		uint64_t sskpd = I915_READ64(MCH_SSKPD);
 
@@ -3880,6 +3897,8 @@ static void ilk_pipe_wm_get_hw_state(struct drm_crtc *crtc)
 	if (IS_HASWELL(dev) || IS_BROADWELL(dev))
 		hw->wm_linetime[pipe] = I915_READ(PIPE_WM_LINETIME(pipe));
 
+	memset(active, 0, sizeof(*active));
+
 	active->pipe_enabled = intel_crtc->active;
 
 	if (active->pipe_enabled) {
@@ -4520,7 +4539,8 @@ void gen6_rps_idle(struct drm_i915_private *dev_priv)
 		else
 			gen6_set_rps(dev_priv->dev, dev_priv->rps.idle_freq);
 		dev_priv->rps.last_adj = 0;
-		I915_WRITE(GEN6_PMINTRMSK, 0xffffffff);
+		I915_WRITE(GEN6_PMINTRMSK,
+			   gen6_sanitize_rps_pm_mask(dev_priv, ~0));
 	}
 	mutex_unlock(&dev_priv->rps.hw_lock);
 
@@ -6620,6 +6640,12 @@ static void broadwell_init_clock_gating(struct drm_device *dev)
 	misccpctl = I915_READ(GEN7_MISCCPCTL);
 	I915_WRITE(GEN7_MISCCPCTL, misccpctl & ~GEN7_DOP_CLOCK_GATE_ENABLE);
 	I915_WRITE(GEN8_L3SQCREG1, BDW_WA_L3SQCREG1_DEFAULT);
+	/*
+	 * Wait at least 100 clocks before re-enabling clock gating. See
+	 * the definition of L3SQCREG1 in BSpec.
+	 */
+	POSTING_READ(GEN8_L3SQCREG1);
+	udelay(1);
 	I915_WRITE(GEN7_MISCCPCTL, misccpctl);
 
 	/*
@@ -7040,6 +7066,7 @@ void intel_suspend_hw(struct drm_device *dev)
 void intel_init_pm(struct drm_device *dev)
 {
 	struct drm_i915_private *dev_priv = dev->dev_private;
+	gdev = dev;
 
 	intel_fbc_init(dev_priv);
 
@@ -7332,3 +7359,44 @@ void intel_pm_setup(struct drm_device *dev)
 
 	dev_priv->pm.suspended = false;
 }
+
+bool ospm_power_is_hw_on(int hw_islands)
+{
+#if 0
+	struct drm_device *drm_dev = gdev;
+	unsigned long flags;
+	bool ret = false;
+	struct drm_i915_private *dev_priv = drm_dev->dev_private;
+	u32 data = vlv_punit_read(dev_priv, VLV_IOSFSB_PWRGT_STATUS);
+
+	if ((VLV_POWER_GATE_DISPLAY_MASK & data)
+			== VLV_POWER_GATE_DISPLAY_MASK) {
+		DRM_ERROR("Display Island not ON\n");
+		return false;
+	} else {
+		return true;
+	}
+#endif
+	return true;
+}
+EXPORT_SYMBOL(ospm_power_is_hw_on);
+
+/* Dummy Function for HDMI Audio Power management.
+ * Will be updated once S0iX code is integrated
+ */
+bool ospm_power_using_hw_begin(int hw_island, UHBUsage usage)
+{
+	struct drm_device *drm_dev = gdev;
+
+	i915_rpm_get_disp(drm_dev);
+	return i915_is_device_active(drm_dev);
+}
+EXPORT_SYMBOL(ospm_power_using_hw_begin);
+
+void ospm_power_using_hw_end(int hw_island)
+{
+	struct drm_device *drm_dev = gdev;
+
+	i915_rpm_put_disp(drm_dev);
+}
+EXPORT_SYMBOL(ospm_power_using_hw_end);

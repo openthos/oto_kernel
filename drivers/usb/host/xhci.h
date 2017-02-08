@@ -232,7 +232,9 @@ struct xhci_op_regs {
  * disabled, or powered-off state.
  */
 #define CMD_PM_INDEX	(1 << 11)
-/* bits 12:31 are reserved (and should be preserved on writes). */
+/* bit 14 Extended TBC Enable, changes Isoc TRB fields to support larger TBC */
+#define CMD_ETE		(1 << 14)
+/* bits 15:31 are reserved (and should be preserved on writes). */
 
 /* IMAN - Interrupt Management Register */
 #define IMAN_IE		(1 << 1)
@@ -312,6 +314,8 @@ struct xhci_op_regs {
 #define XDEV_U2		(0x2 << 5)
 #define XDEV_U3		(0x3 << 5)
 #define XDEV_INACTIVE	(0x6 << 5)
+#define XDEV_POLLING	(0x7 << 5)
+#define XDEV_COMP_MODE  (0xa << 5)
 #define XDEV_RESUME	(0xf << 5)
 /* true: port has power (see HCC_PPC) */
 #define PORT_POWER	(1 << 9)
@@ -343,6 +347,7 @@ struct xhci_op_regs {
 #define	SLOT_SPEED_LS		(XDEV_LS << 10)
 #define	SLOT_SPEED_HS		(XDEV_HS << 10)
 #define	SLOT_SPEED_SS		(XDEV_SS << 10)
+#define	SLOT_SPEED_SSP		(XDEV_SSP << 10)
 /* Port Indicator Control */
 #define PORT_LED_OFF	(0 << 14)
 #define PORT_LED_AMBER	(1 << 14)
@@ -748,8 +753,9 @@ struct xhci_ep_ctx {
 #define GET_MAX_PACKET(p)	((p) & 0x7ff)
 
 /* tx_info bitmasks */
-#define AVG_TRB_LENGTH_FOR_EP(p)	((p) & 0xffff)
-#define MAX_ESIT_PAYLOAD_FOR_EP(p)	(((p) & 0xffff) << 16)
+#define EP_AVG_TRB_LENGTH(p)		((p) & 0xffff)
+#define EP_MAX_ESIT_PAYLOAD_LO(p)	(((p) & 0xffff) << 16)
+#define EP_MAX_ESIT_PAYLOAD_HI(p)	((((p) >> 16) & 0xff) << 24)
 #define CTX_TO_MAX_ESIT_PAYLOAD(p)	(((p) >> 16) & 0xffff)
 
 /* deq bitmasks */
@@ -941,6 +947,8 @@ struct xhci_virt_ep {
 	struct list_head	bw_endpoint_list;
 	/* Isoch Frame ID checking storage */
 	int			next_frame_id;
+	/* Use new Isoch TRB layout needed for extended TBC support */
+	bool			use_extended_tbc;
 };
 
 enum xhci_overhead_type {
@@ -1182,9 +1190,12 @@ enum xhci_setup_dev {
 #define	TRB_LEN(p)		((p) & 0x1ffff)
 /* TD Size, packets remaining in this TD, bits 21:17 (5 bits, so max 31) */
 #define TRB_TD_SIZE(p)          (min((p), (u32)31) << 17)
+/* xhci 1.1 uses the TD_SIZE field for TBC if Extended TBC is enabled (ETE) */
+#define TRB_TD_SIZE_TBC(p)      (min((p), (u32)31) << 17)
 /* Interrupter Target - which MSI-X vector to target the completion event at */
 #define TRB_INTR_TARGET(p)	(((p) & 0x3ff) << 22)
 #define GET_INTR_TARGET(p)	(((p) >> 22) & 0x3ff)
+/* Total burst count field, Rsvdz on xhci 1.1 with Extended TBC enabled (ETE) */
 #define TRB_TBC(p)		(((p) & 0x3) << 7)
 #define TRB_TLBPC(p)		(((p) & 0xf) << 16)
 
@@ -1550,7 +1561,8 @@ struct xhci_hcd {
 #define CMD_RING_STATE_STOPPED         (1 << 2)
 	struct list_head        cmd_list;
 	unsigned int		cmd_ring_reserved_trbs;
-	struct timer_list	cmd_timer;
+	struct delayed_work	cmd_timer;
+	struct completion	cmd_ring_stop_completion;
 	struct xhci_command	*current_cmd;
 	struct xhci_ring	*event_ring;
 	struct xhci_erst	erst;
@@ -1631,6 +1643,7 @@ struct xhci_hcd {
 /* For controllers with a broken beyond repair streams implementation */
 #define XHCI_BROKEN_STREAMS	(1 << 19)
 #define XHCI_PME_STUCK_QUIRK	(1 << 20)
+#define XHCI_MISSING_CAS	(1 << 24)
 	unsigned int		num_active_eps;
 	unsigned int		limit_active_eps;
 	/* There are two roothubs to keep track of bus suspend info for */
@@ -1912,7 +1925,7 @@ void xhci_queue_config_ep_quirk(struct xhci_hcd *xhci,
 		unsigned int slot_id, unsigned int ep_index,
 		struct xhci_dequeue_state *deq_state);
 void xhci_stop_endpoint_command_watchdog(unsigned long arg);
-void xhci_handle_command_timeout(unsigned long data);
+void xhci_handle_command_timeout(struct work_struct *work);
 
 void xhci_ring_ep_doorbell(struct xhci_hcd *xhci, unsigned int slot_id,
 		unsigned int ep_index, unsigned int stream_id);

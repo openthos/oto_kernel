@@ -38,6 +38,8 @@
 #include <drm/i915_drm.h>
 #include "i915_drv.h"
 
+static int i915_notify_had;
+
 static struct drm_device *intel_hdmi_to_dev(struct intel_hdmi *intel_hdmi)
 {
 	return hdmi_to_dig_port(intel_hdmi)->base.base.dev;
@@ -1331,19 +1333,18 @@ intel_hdmi_unset_edid(struct drm_connector *connector)
 }
 
 static bool
-intel_hdmi_set_edid(struct drm_connector *connector, bool force)
+intel_hdmi_set_edid(struct drm_connector *connector)
 {
 	struct drm_i915_private *dev_priv = to_i915(connector->dev);
 	struct intel_hdmi *intel_hdmi = intel_attached_hdmi(connector);
-	struct edid *edid = NULL;
+	struct edid *edid;
 	bool connected = false;
 
 	intel_display_power_get(dev_priv, POWER_DOMAIN_GMBUS);
 
-	if (force)
-		edid = drm_get_edid(connector,
-				    intel_gmbus_get_adapter(dev_priv,
-				    intel_hdmi->ddc_bus));
+	edid = drm_get_edid(connector,
+			    intel_gmbus_get_adapter(dev_priv,
+			    intel_hdmi->ddc_bus));
 
 	intel_display_power_put(dev_priv, POWER_DOMAIN_GMBUS);
 
@@ -1367,42 +1368,142 @@ intel_hdmi_set_edid(struct drm_connector *connector, bool force)
 	return connected;
 }
 
+static bool vlv_hdmi_live_status(struct drm_device *dev,
+			struct intel_hdmi *intel_hdmi)
+{
+	uint32_t bit;
+	struct drm_i915_private *dev_priv = dev->dev_private;
+	struct intel_digital_port *intel_dig_port =
+					hdmi_to_dig_port(intel_hdmi);
+
+	DRM_DEBUG_KMS("Reading Live status");
+	switch (intel_dig_port->port) {
+	case PORT_B:
+		bit = HDMIB_HOTPLUG_LIVE_STATUS;
+		break;
+	case PORT_C:
+		bit = HDMIC_HOTPLUG_LIVE_STATUS;
+		break;
+	case PORT_D:
+		bit = HDMID_HOTPLUG_LIVE_STATUS;
+		break;
+	default:
+		bit = 0;
+	}
+
+	/* Return results in trems of connector */
+	return I915_READ(PORT_HOTPLUG_STAT) & bit;
+}
+
+
+/*
+ * intel_hdmi_live_status: detect live status of HDMI
+ * if device is gen 6 and above, read the live status reg
+ * else, do not block the detection, return true
+ */
+static bool intel_hdmi_live_status(struct drm_connector *connector)
+{
+	struct drm_device *dev = connector->dev;
+	struct intel_hdmi *intel_hdmi = intel_attached_hdmi(connector);
+
+	if (INTEL_INFO(dev)->gen > 6) {
+		/* Todo: Implement for other Gen 6+ archs*/
+		if (IS_VALLEYVIEW(dev))
+			return vlv_hdmi_live_status(dev, intel_hdmi);
+	}
+
+	return true;
+}
+
+/* Read DDC and get EDID */
+struct edid *intel_hdmi_get_edid(struct drm_connector *connector, bool force)
+{
+	bool current_state = false;
+	bool saved_state = false;
+
+	struct edid *new_edid = NULL;
+	struct i2c_adapter *adapter = NULL;
+	struct drm_device *dev = connector->dev;
+	struct drm_i915_private *dev_priv = dev->dev_private;
+	struct intel_hdmi *intel_hdmi = intel_attached_hdmi(connector);
+	u32 hotplug_status = dev_priv->hotplug_status;
+	enum port hdmi_port = hdmi_to_dig_port(intel_hdmi)->port;
+	unsigned char retry = HDMI_EDID_RETRY_COUNT;
+
+	if (!intel_hdmi) {
+		DRM_ERROR("Invalid input to get hdmi\n");
+		return NULL;
+	}
+
+	/* Get the saved status from top half */
+	saved_state = hotplug_status & (1 << (HDMI_LIVE_STATUS_BASE - hdmi_port));
+
+	/*
+	 * Few monitors are slow to respond on EDID and live status,
+	 * so read live status multiple times within a max delay of 30ms
+	 */
+	do {
+		mdelay(HDMI_LIVE_STATUS_DELAY_STEP);
+		current_state = intel_hdmi_live_status(connector);
+		if (current_state)
+			break;
+	} while (retry--);
+
+	/* Compare current status, and saved status in top half */
+	if (current_state != saved_state)
+		DRM_DEBUG_DRIVER("Warning: Saved HDMI status != current status");
+
+	/* Read EDID if live status or saved status is up, or we are forced */
+	if (current_state || saved_state || force) {
+
+		adapter = intel_gmbus_get_adapter(dev_priv,
+					intel_hdmi->ddc_bus);
+		if (!adapter) {
+			DRM_ERROR("Get_hdmi cant get adapter\n");
+			return NULL;
+		}
+
+		/*
+		 * Few monitors issue EDID after some delay, so give them
+		 * some chances, but within 30ms
+		 */
+		retry = 3;
+READ_EDID:
+		new_edid = drm_get_edid(connector, adapter);
+		if (!new_edid) {
+			if (retry--) {
+				mdelay(HDMI_LIVE_STATUS_DELAY_STEP);
+				goto READ_EDID;
+			}
+
+			DRM_ERROR("Get_hdmi cant read edid\n");
+			return NULL;
+		}
+
+		DRM_DEBUG_KMS("Live status up, got EDID");
+	}
+
+	return new_edid;
+}
+
 static enum drm_connector_status
 intel_hdmi_detect(struct drm_connector *connector, bool force)
 {
 	enum drm_connector_status status;
-	struct intel_hdmi *intel_hdmi = intel_attached_hdmi(connector);
+	struct intel_hdmi *intel_hdmi;
 	struct drm_i915_private *dev_priv = to_i915(connector->dev);
-	bool live_status = false;
-	unsigned int try;
+	bool inform_audio = false;
+	struct drm_device *dev = connector->dev;
 
 	DRM_DEBUG_KMS("[CONNECTOR:%d:%s]\n",
 		      connector->base.id, connector->name);
 
 	intel_display_power_get(dev_priv, POWER_DOMAIN_GMBUS);
 
-	for (try = 0; !live_status && try < 9; try++) {
-		if (try)
-			msleep(10);
-		live_status = intel_digital_port_connected(dev_priv,
-				hdmi_to_dig_port(intel_hdmi));
-	}
-
-	if (!live_status) {
-		DRM_DEBUG_KMS("HDMI live status down\n");
-		/*
-		 * Live status register is not reliable on all intel platforms.
-		 * So consider live_status only for certain platforms, for
-		 * others, read EDID to determine presence of sink.
-		 */
-		if (INTEL_INFO(dev_priv)->gen < 7 || IS_IVYBRIDGE(dev_priv))
-			live_status = true;
-	}
-
 	intel_hdmi_unset_edid(connector);
 
-	if (intel_hdmi_set_edid(connector, live_status)) {
-		struct intel_hdmi *intel_hdmi = intel_attached_hdmi(connector);
+	if (intel_hdmi_set_edid(connector)) {
+		intel_hdmi = intel_attached_hdmi(connector);
 
 		hdmi_to_dig_port(intel_hdmi)->base.type = INTEL_OUTPUT_HDMI;
 		status = connector_status_connected;
@@ -1410,6 +1511,31 @@ intel_hdmi_detect(struct drm_connector *connector, bool force)
 		status = connector_status_disconnected;
 
 	intel_display_power_put(dev_priv, POWER_DOMAIN_GMBUS);
+
+	/* Need to inform audio about the event */
+	intel_hdmi = intel_attached_hdmi(connector);
+	if (intel_hdmi->has_audio)
+		inform_audio = true;
+
+	if (status == connector_status_connected) {
+		if (intel_hdmi->has_audio)
+			i915_notify_had = 1;
+	} else {
+		struct intel_digital_port *intel_dig_port =
+				hdmi_to_dig_port(intel_hdmi);
+
+		chv_set_lpe_audio_reg_pipe(dev, INTEL_OUTPUT_HDMI,
+					intel_dig_port->port);
+		/* Send a disconnect event to audio */
+		if (inform_audio) {
+			DRM_DEBUG_DRIVER("Sending event to audio");
+			mid_hdmi_audio_signal_event(dev_priv->dev,
+			HAD_EVENT_HOT_UNPLUG);
+		}
+	}
+
+	if (IS_VALLEYVIEW(dev))
+		i915_hdmi_state = status;
 
 	return status;
 }
@@ -1427,19 +1553,36 @@ intel_hdmi_force(struct drm_connector *connector)
 	if (connector->status != connector_status_connected)
 		return;
 
-	intel_hdmi_set_edid(connector, true);
+	intel_hdmi_set_edid(connector);
 	hdmi_to_dig_port(intel_hdmi)->base.type = INTEL_OUTPUT_HDMI;
 }
 
 static int intel_hdmi_get_modes(struct drm_connector *connector)
 {
 	struct edid *edid;
+	struct intel_encoder *intel_encoder = intel_attached_encoder(connector);
+	struct intel_hdmi *intel_hdmi = enc_to_intel_hdmi(&intel_encoder->base);
+	struct intel_digital_port *intel_dig_port =
+				hdmi_to_dig_port(intel_hdmi);
+	struct drm_device *dev = connector->dev;
+	int ret;
+	struct drm_i915_private *dev_priv = connector->dev->dev_private;
 
 	edid = to_intel_connector(connector)->detect_edid;
 	if (edid == NULL)
 		return 0;
 
-	return intel_connector_update_modes(connector, edid);
+	ret = intel_connector_update_modes(connector, edid);
+
+	if (i915_notify_had) {
+		chv_set_lpe_audio_reg_pipe(dev, INTEL_OUTPUT_HDMI,
+					intel_dig_port->port);
+		mid_hdmi_audio_signal_event(dev_priv->dev,
+			HAD_EVENT_HOT_PLUG);
+		i915_notify_had = 0;
+	}
+
+	return ret;
 }
 
 static bool
@@ -2019,6 +2162,50 @@ intel_hdmi_add_properties(struct intel_hdmi *intel_hdmi, struct drm_connector *c
 	intel_hdmi->aspect_ratio = HDMI_PICTURE_ASPECT_NONE;
 }
 
+static u8 intel_hdmi_ddc_pin(struct drm_i915_private *dev_priv,
+			     enum port port)
+{
+	const struct ddi_vbt_port_info *info =
+		&dev_priv->vbt.ddi_port_info[port];
+	u8 ddc_pin;
+
+	if (info->alternate_ddc_pin) {
+		DRM_DEBUG_KMS("Using DDC pin 0x%x for port %c (VBT)\n",
+			      info->alternate_ddc_pin, port_name(port));
+		return info->alternate_ddc_pin;
+	}
+
+	switch (port) {
+	case PORT_B:
+		if (IS_BROXTON(dev_priv))
+			ddc_pin = GMBUS_PIN_1_BXT;
+		else
+			ddc_pin = GMBUS_PIN_DPB;
+		break;
+	case PORT_C:
+		if (IS_BROXTON(dev_priv))
+			ddc_pin = GMBUS_PIN_2_BXT;
+		else
+			ddc_pin = GMBUS_PIN_DPC;
+		break;
+	case PORT_D:
+		if (IS_CHERRYVIEW(dev_priv))
+			ddc_pin = GMBUS_PIN_DPD_CHV;
+		else
+			ddc_pin = GMBUS_PIN_DPD;
+		break;
+	default:
+		MISSING_CASE(port);
+		ddc_pin = GMBUS_PIN_DPB;
+		break;
+	}
+
+	DRM_DEBUG_KMS("Using DDC pin 0x%x for port %c (platform default)\n",
+		      ddc_pin, port_name(port));
+
+	return ddc_pin;
+}
+
 void intel_hdmi_init_connector(struct intel_digital_port *intel_dig_port,
 			       struct intel_connector *intel_connector)
 {
@@ -2028,7 +2215,9 @@ void intel_hdmi_init_connector(struct intel_digital_port *intel_dig_port,
 	struct drm_device *dev = intel_encoder->base.dev;
 	struct drm_i915_private *dev_priv = dev->dev_private;
 	enum port port = intel_dig_port->port;
-	uint8_t alternate_ddc_pin;
+
+	DRM_DEBUG_KMS("Adding HDMI connector on port %c\n",
+		      port_name(port));
 
 	drm_connector_init(dev, connector, &intel_hdmi_connector_funcs,
 			   DRM_MODE_CONNECTOR_HDMIA);
@@ -2038,12 +2227,10 @@ void intel_hdmi_init_connector(struct intel_digital_port *intel_dig_port,
 	connector->doublescan_allowed = 0;
 	connector->stereo_allowed = 1;
 
+	intel_hdmi->ddc_bus = intel_hdmi_ddc_pin(dev_priv, port);
+
 	switch (port) {
 	case PORT_B:
-		if (IS_BROXTON(dev_priv))
-			intel_hdmi->ddc_bus = GMBUS_PIN_1_BXT;
-		else
-			intel_hdmi->ddc_bus = GMBUS_PIN_DPB;
 		/*
 		 * On BXT A0/A1, sw needs to activate DDIA HPD logic and
 		 * interrupts to check the external panel connection.
@@ -2054,46 +2241,17 @@ void intel_hdmi_init_connector(struct intel_digital_port *intel_dig_port,
 			intel_encoder->hpd_pin = HPD_PORT_B;
 		break;
 	case PORT_C:
-		if (IS_BROXTON(dev_priv))
-			intel_hdmi->ddc_bus = GMBUS_PIN_2_BXT;
-		else
-			intel_hdmi->ddc_bus = GMBUS_PIN_DPC;
 		intel_encoder->hpd_pin = HPD_PORT_C;
 		break;
 	case PORT_D:
-		if (WARN_ON(IS_BROXTON(dev_priv)))
-			intel_hdmi->ddc_bus = GMBUS_PIN_DISABLED;
-		else if (IS_CHERRYVIEW(dev_priv))
-			intel_hdmi->ddc_bus = GMBUS_PIN_DPD_CHV;
-		else
-			intel_hdmi->ddc_bus = GMBUS_PIN_DPD;
 		intel_encoder->hpd_pin = HPD_PORT_D;
 		break;
 	case PORT_E:
-		/* On SKL PORT E doesn't have seperate GMBUS pin
-		 *  We rely on VBT to set a proper alternate GMBUS pin. */
-		alternate_ddc_pin =
-			dev_priv->vbt.ddi_port_info[PORT_E].alternate_ddc_pin;
-		switch (alternate_ddc_pin) {
-		case DDC_PIN_B:
-			intel_hdmi->ddc_bus = GMBUS_PIN_DPB;
-			break;
-		case DDC_PIN_C:
-			intel_hdmi->ddc_bus = GMBUS_PIN_DPC;
-			break;
-		case DDC_PIN_D:
-			intel_hdmi->ddc_bus = GMBUS_PIN_DPD;
-			break;
-		default:
-			MISSING_CASE(alternate_ddc_pin);
-		}
 		intel_encoder->hpd_pin = HPD_PORT_E;
 		break;
-	case PORT_A:
-		intel_encoder->hpd_pin = HPD_PORT_A;
-		/* Internal port only for eDP. */
 	default:
-		BUG();
+		MISSING_CASE(port);
+		return;
 	}
 
 	if (IS_VALLEYVIEW(dev)) {
@@ -2138,6 +2296,20 @@ void intel_hdmi_init_connector(struct intel_digital_port *intel_dig_port,
 		u32 temp = I915_READ(PEG_BAND_GAP_DATA);
 		I915_WRITE(PEG_BAND_GAP_DATA, (temp & ~0xf) | 0xd);
 	}
+
+	i915_notify_had = 1;
+}
+
+/* Added for HDMI Audio */
+void i915_had_wq(struct work_struct *work)
+{
+	struct drm_i915_private *dev_priv = container_of(work,
+		struct drm_i915_private, hdmi_audio_wq);
+
+	if (i915_hdmi_state == connector_status_connected) {
+		mid_hdmi_audio_signal_event(dev_priv->dev,
+			HAD_EVENT_HOT_PLUG);
+	}
 }
 
 void intel_hdmi_init(struct drm_device *dev, int hdmi_reg, enum port port)
@@ -2145,7 +2317,10 @@ void intel_hdmi_init(struct drm_device *dev, int hdmi_reg, enum port port)
 	struct intel_digital_port *intel_dig_port;
 	struct intel_encoder *intel_encoder;
 	struct intel_connector *intel_connector;
-
+	/* Added for HDMI Audio */
+	struct hdmi_audio_priv *hdmi_priv;
+	struct drm_i915_private *dev_priv = dev->dev_private;
+	
 	intel_dig_port = kzalloc(sizeof(*intel_dig_port), GFP_KERNEL);
 	if (!intel_dig_port)
 		return;
@@ -2155,6 +2330,7 @@ void intel_hdmi_init(struct drm_device *dev, int hdmi_reg, enum port port)
 		kfree(intel_dig_port);
 		return;
 	}
+
 
 	intel_encoder = &intel_dig_port->base;
 
@@ -2214,4 +2390,29 @@ void intel_hdmi_init(struct drm_device *dev, int hdmi_reg, enum port port)
 	intel_dig_port->dp.output_reg = 0;
 
 	intel_hdmi_init_connector(intel_dig_port, intel_connector);
+
+	/* Added for HDMI Audio */
+	/* HDMI private data */
+	INIT_WORK(&dev_priv->hdmi_audio_wq, i915_had_wq);
+	hdmi_priv = kzalloc(sizeof(struct hdmi_audio_priv), GFP_KERNEL);
+	if (!hdmi_priv) {
+		pr_err("failed to allocate memory");
+	} else {
+		hdmi_priv->dev = dev;
+		if (IS_CHERRYVIEW(dev)) { 
+			// FIXME: plb: looks wrong
+			// mapping between stream and Hdmi port ?
+			hdmi_priv->hdmi_reg = HDMIC;
+			hdmi_priv->hdmi_lpe_audio_reg =
+					I915_HDMI_AUDIO_LPE_C_CONFIG;
+		} else {
+			hdmi_priv->hdmi_reg = HDMIB;
+			hdmi_priv->hdmi_lpe_audio_reg =
+					I915_HDMI_AUDIO_LPE_A_CONFIG;
+		}
+		hdmi_priv->monitor_type = MONITOR_TYPE_HDMI;
+		hdmi_priv->is_hdcp_supported = true;
+		i915_hdmi_audio_init(hdmi_priv);
+	}
+
 }

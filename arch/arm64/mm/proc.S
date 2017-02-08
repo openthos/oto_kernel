@@ -23,10 +23,9 @@
 #include <asm/assembler.h>
 #include <asm/asm-offsets.h>
 #include <asm/hwcap.h>
-#include <asm/pgtable-hwdef.h>
 #include <asm/pgtable.h>
-
-#include "proc-macros.S"
+#include <asm/cpufeature.h>
+#include <asm/alternative.h>
 
 #ifdef CONFIG_ARM64_64K_PAGES
 #define TCR_TG_FLAGS	TCR_TG0_64K | TCR_TG1_64K
@@ -137,10 +136,37 @@ ENTRY(cpu_do_switch_mm)
 	bfi	x0, x1, #48, #16		// set the ASID
 	msr	ttbr0_el1, x0			// set TTBR0
 	isb
+	post_ttbr0_update_workaround
 	ret
 ENDPROC(cpu_do_switch_mm)
 
-	.section ".text.init", #alloc, #execinstr
+	.pushsection ".idmap.text", "ax"
+/*
+ * void idmap_cpu_replace_ttbr1(phys_addr_t new_pgd)
+ *
+ * This is the low-level counterpart to cpu_replace_ttbr1, and should not be
+ * called by anything else. It can only be executed from a TTBR0 mapping.
+ */
+ENTRY(idmap_cpu_replace_ttbr1)
+	mrs	x2, daif
+	msr	daifset, #0xf
+
+	adrp	x1, empty_zero_page
+	msr	ttbr1_el1, x1
+	isb
+
+	tlbi	vmalle1
+	dsb	nsh
+	isb
+
+	msr	ttbr1_el1, x0
+	isb
+
+	msr	daif, x2
+
+	ret
+ENDPROC(idmap_cpu_replace_ttbr1)
+	.popsection
 
 /*
  *	__cpu_setup
@@ -156,6 +182,8 @@ ENTRY(__cpu_setup)
 	msr	cpacr_el1, x0			// Enable FP/ASIMD
 	mov	x0, #1 << 12			// Reset mdscr_el1 and disable
 	msr	mdscr_el1, x0			// access to the DCC from EL0
+	isb					// Unmask debug exceptions now,
+	enable_dbg				// since this is per-cpu
 	reset_pmuserenr_el0 x0			// Disable PMU access from EL0
 	/*
 	 * Memory region attributes for LPAE:

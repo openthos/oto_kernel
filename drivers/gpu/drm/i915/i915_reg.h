@@ -1993,7 +1993,25 @@ enum skl_disp_power_wells {
 #define I915_WINVALID_INTERRUPT				(1<<1)
 #define I915_USER_INTERRUPT				(1<<1)
 #define I915_ASLE_INTERRUPT				(1<<0)
+#define I915_LPE_AUDIO_HDMI_STATUS_A	(dev_priv->info.display_mmio_offset + 0x65064)
+#define I915_LPE_AUDIO_HDMI_STATUS_B	(dev_priv->info.display_mmio_offset + 0x65864)
+#define I915_LPE_AUDIO_HDMI_STATUS_C	(dev_priv->info.display_mmio_offset + 0x65964)
+#define I915_HDMI_AUDIO_UNDERRUN			(1UL<<31)
+#define I915_HDMI_AUDIO_BUFFER_DONE			(1UL<<29)
 #define I915_BSD_USER_INTERRUPT				(1<<25)
+#define I915_HDMI_AUDIO_UNDERRUN_ENABLE			(1UL<<15)
+
+#define I915_HDMI_AUDIO_LPE_C_CONFIG			0x65900
+#define I915_HDMI_AUDIO_LPE_B_CONFIG			0x65800
+#define I915_HDMI_AUDIO_LPE_A_CONFIG			0x65000
+
+#define HDMI_LPE_AUDIO_PIPE_OFFSET			0x100
+#define HDMI_LPE_AUDIO_PIPE_BC_OFFSET(pipe) \
+	(I915_LPE_AUDIO_HDMI_STATUS_B + \
+	(pipe - 1) * HDMI_LPE_AUDIO_PIPE_OFFSET)
+#define I915_LPE_AUDIO_HDMI_STATUS(pipe) \
+	(pipe ? (HDMI_LPE_AUDIO_PIPE_BC_OFFSET(pipe)) : \
+	I915_LPE_AUDIO_HDMI_STATUS_A)
 
 #define GEN6_BSD_RNCID			0x12198
 
@@ -3240,19 +3258,20 @@ enum skl_disp_power_wells {
 
 #define PORT_HOTPLUG_STAT	(dev_priv->info.display_mmio_offset + 0x61114)
 /*
- * HDMI/DP bits are gen4+
+ * HDMI/DP bits are g4x+
  *
  * WARNING: Bspec for hpd status bits on gen4 seems to be completely confused.
  * Please check the detailed lore in the commit message for for experimental
  * evidence.
  */
-#define   PORTD_HOTPLUG_LIVE_STATUS_G4X		(1 << 29)
+/* Bspec says GM45 should match G4X/VLV/CHV, but reality disagrees */
+#define   PORTD_HOTPLUG_LIVE_STATUS_GM45	(1 << 29)
+#define   PORTC_HOTPLUG_LIVE_STATUS_GM45	(1 << 28)
+#define   PORTB_HOTPLUG_LIVE_STATUS_GM45	(1 << 27)
+/* G4X/VLV/CHV DP/HDMI bits again match Bspec */
+#define   PORTD_HOTPLUG_LIVE_STATUS_G4X		(1 << 27)
 #define   PORTC_HOTPLUG_LIVE_STATUS_G4X		(1 << 28)
-#define   PORTB_HOTPLUG_LIVE_STATUS_G4X		(1 << 27)
-/* VLV DP/HDMI bits again match Bspec */
-#define   PORTD_HOTPLUG_LIVE_STATUS_VLV		(1 << 27)
-#define   PORTC_HOTPLUG_LIVE_STATUS_VLV		(1 << 28)
-#define   PORTB_HOTPLUG_LIVE_STATUS_VLV		(1 << 29)
+#define   PORTB_HOTPLUG_LIVE_STATUS_G4X		(1 << 29)
 #define   PORTD_HOTPLUG_INT_STATUS		(3 << 21)
 #define   PORTD_HOTPLUG_INT_LONG_PULSE		(2 << 21)
 #define   PORTD_HOTPLUG_INT_SHORT_PULSE		(1 << 21)
@@ -3303,8 +3322,13 @@ enum skl_disp_power_wells {
 
 /* SDVO and HDMI port control.
  * The same register may be used for SDVO or HDMI */
-#define GEN3_SDVOB	0x61140
-#define GEN3_SDVOC	0x61160
+#define _GEN3_SDVOB	0x61140
+#define _GEN3_SDVOC	0x61160
+#define GEN3_SDVOB	(_GEN3_SDVOB)
+#define GEN3_SDVOC	(_GEN3_SDVOC)
+#define HDMIB	(dev_priv->info.display_mmio_offset + 0x61140)
+#define HDMIC	(dev_priv->info.display_mmio_offset + 0x61160)
+#define HDMID	(dev_priv->info.display_mmio_offset + 0x6116C)
 #define GEN4_HDMIB	GEN3_SDVOB
 #define GEN4_HDMIC	GEN3_SDVOC
 #define VLV_HDMIB	(VLV_DISPLAY_BASE + GEN4_HDMIB)
@@ -3312,8 +3336,9 @@ enum skl_disp_power_wells {
 #define CHV_HDMID	(VLV_DISPLAY_BASE + 0x6116C)
 #define PCH_SDVOB	0xe1140
 #define PCH_HDMIB	PCH_SDVOB
-#define PCH_HDMIC	0xe1150
-#define PCH_HDMID	0xe1160
+#define PCH_HDMIC	(0xe1150)
+#define PCH_HDMID	(0xe1160)
+#define PORT_ENABLE	(1 << 31)
 
 #define PORT_DFT_I9XX				0x61150
 #define   DC_BALANCE_RESET			(1 << 25)
@@ -7356,6 +7381,8 @@ enum skl_disp_power_wells {
 /* For each transcoder, we need to select the corresponding port clock */
 #define  TRANS_CLK_SEL_DISABLED		(0x0<<29)
 #define  TRANS_CLK_SEL_PORT(x)		(((x)+1)<<29)
+
+#define CDCLK_FREQ			0x46200
 
 #define TRANSA_MSA_MISC			0x60410
 #define TRANSB_MSA_MISC			0x61410
