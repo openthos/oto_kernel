@@ -1027,10 +1027,12 @@ static void __init cpu_set_bug_bits(struct cpuinfo_x86 *c)
 
 	setup_force_cpu_bug(X86_BUG_CPU_MELTDOWN);
 
+#if 0
 	if (x86_match_cpu(cpu_no_l1tf))
 		return;
 
 	setup_force_cpu_bug(X86_BUG_L1TF);
+#endif
 }
 
 /*
